@@ -26,6 +26,11 @@
 
 MainWindow * MainWindow::_instance = nullptr;
 
+LvglWidgetFactory mainWindowFactory = LvglWidgetFactory([] (lv_obj_t *parent) {
+  return lv_obj_create(nullptr);
+});
+
+
 #if defined(HARDWARE_TOUCH)
 TouchState touchState;
 Keyboard * Keyboard::activeKeyboard = nullptr;
@@ -72,14 +77,18 @@ void MainWindow::setTouchEnabled(bool enable)
 }
 #endif
 
+#if defined(HARDWARE_TOUCH)
+bool getTouchOccured();
+#endif
 void MainWindow::checkEvents()
 {
 #if defined(HARDWARE_TOUCH)
 
-  if (touchPanelEventOccured()) {
+//  if (touchPanelEventOccured()) {
+  if (getTouchOccured()) {
     short lastDeltaX = touchState.lastDeltaX;
     short lastDeltaY = touchState.lastDeltaY;;
-    touchState = touchPanelRead();
+    touchState = getLastTochState();  // this is a hack until we fully figure out touch
     touchState.lastDeltaX = lastDeltaX;
     touchState.lastDeltaY = lastDeltaY;
   }
@@ -181,15 +190,13 @@ void MainWindow::invalidate(const rect_t & rect)
 }
 #include "lvgl/lvgl.h"
 extern lv_obj_t * canvas;
-extern BitmapBuffer lcdBackup;
+extern BitmapBuffer canBuf;
 bool MainWindow::refresh()
 {
   if (invalidatedRect.w) {
-    lcdBackup.setOffset(0, 0);
-    lcdBackup.setClippingRect(0,LCD_W,0, LCD_H);
-    fullPaint(&lcdBackup);
-    lv_canvas_copy_buf(canvas, lcdBackup.getData(), 0, 0, LCD_W, LCD_H);
-    lv_img_cache_invalidate_src(lcdBackup.getData());
+    canBuf.setOffset(0, 0);
+    canBuf.setClippingRect(0,LCD_W,0, LCD_H);
+    fullPaint(&canBuf);
     lv_obj_invalidate(canvas);
   }
   return false;
@@ -217,6 +224,9 @@ void MainWindow::run(bool trash)
 {
   auto start = ticksNow();
 
+  // KLK: removed for now.  This is now
+  // called from lvgl event processing when
+  // necessary
   checkEvents();
 
   if (trash) {

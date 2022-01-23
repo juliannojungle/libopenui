@@ -19,13 +19,54 @@
 
 #include "window.h"
 #include "touch.h"
+#include "mainwindow.h"
 
 Window * Window::focusWindow = nullptr;
 Window * Window::slidingWindow = nullptr;
 Window * Window::capturedWindow = nullptr;
 std::list<Window *> Window::trash;
 
-Window::Window(Window * parent, const rect_t & rect, WindowFlags windowFlags, LcdFlags textFlags):
+
+static void window_event_cb(lv_event_t * e)
+{
+  lv_event_code_t code = lv_event_get_code(e);
+  Window *window = (Window *) lv_event_get_user_data(e);
+  if (code == LV_EVENT_GET_SELF_SIZE) {
+    lv_point_t * p = (lv_point_t *)lv_event_get_param(e);
+    if (p->x >= 0) {
+      p->x = window->getInnerWidth();
+    }
+    if (p->y >= 0)
+      p->y = window->getInnerHeight();
+  }
+
+  lv_obj_t *currentTarget = lv_event_get_current_target(e);
+  
+  // if the event bubbled to the topmost window then hand it to libopenui MainWindow.
+  if (MainWindow::isMainWindowCreated()) {
+    if (code == LV_EVENT_PRESSED || code == LV_EVENT_RELEASED || code == LV_EVENT_KEY ||
+        code == LV_EVENT_SCROLL_BEGIN  || code == LV_EVENT_SCROLL_END || code == LV_EVENT_SCROLL) {
+      
+      // if we have bubbled to the top then do legacy processing    
+      if (lv_obj_get_parent(currentTarget) == nullptr) {
+        MainWindow::instance()->checkEvents();
+      }
+    }
+  }
+}
+
+LvglWidgetFactory windowFactory = LvglWidgetFactory(
+  [] (lv_obj_t *parent) {
+    return lv_obj_create(parent);
+  },
+  [] (LvglWidgetFactory *factory) {
+    lv_style_set_pad_all(&factory->style, 0);
+    lv_style_set_bg_opa(&factory->style, LV_OPA_TRANSP);
+    lv_style_set_border_width(&factory->style, 0);
+    lv_style_set_radius(&factory->style, 0);
+  });
+
+Window::Window(Window * parent, const rect_t & rect, WindowFlags windowFlags, LcdFlags textFlags, LvglWidgetFactory *factory) :
   parent(parent),
   rect(rect),
   innerWidth(rect.w),
@@ -33,6 +74,23 @@ Window::Window(Window * parent, const rect_t & rect, WindowFlags windowFlags, Lc
   windowFlags(windowFlags),
   textFlags(textFlags)
 {
+  lv_obj_t *lvParent = parent != nullptr ? parent->lvobj : nullptr;
+  lvobj = (factory == nullptr) ?
+    windowFactory.construct(lvParent) :
+    factory->construct(lvParent);
+
+  lv_obj_add_flag(lvobj, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+  lv_obj_add_style(lvobj, &windowFactory.style, LV_PART_MAIN);
+  lv_obj_set_pos(lvobj, rect.x, rect.y);
+  lv_obj_set_size(lvobj, rect.w, rect.h);
+  lv_obj_set_user_data(lvobj, this);
+
+  lv_obj_set_scrollbar_mode(lvobj, LV_SCROLLBAR_MODE_OFF);
+  lv_obj_clear_flag(lvobj, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+  lv_obj_clear_flag(lvobj, LV_OBJ_FLAG_SCROLL_ELASTIC);
+  lv_obj_add_event_cb(lvobj, window_event_cb, LV_EVENT_ALL, this);
+
   if (parent) {
     parent->addChild(this, windowFlags & PUSH_FRONT);
     if (!(windowFlags & TRANSPARENT)) {
@@ -40,23 +98,34 @@ Window::Window(Window * parent, const rect_t & rect, WindowFlags windowFlags, Lc
     }
   }
 }
-
+extern lv_obj_t * canvas;
 Window::~Window()
 {
   TRACE_WINDOWS("Destroy %p %s", this, getWindowDebugString().c_str());
-
   if (focusWindow == this) {
     focusWindow = nullptr;
   }
 
-  deleteChildren();
+  if(children.size() > 0)
+    deleteChildren();
+  if (lvobj != nullptr && lvobj != canvas)
+  {
+    lv_obj_del(lvobj);
+    lvobj = nullptr;
+  }
+
 }
 
 void Window::attach(Window * newParent)
 {
   if (parent) detach();
   parent = newParent;
-  if (newParent) newParent->addChild(this);
+  if (newParent)
+  {
+    newParent->addChild(this);
+    if(lvobj != nullptr)
+      lv_obj_set_parent(lvobj, newParent->lvobj);
+  }
 }
 
 void Window::detach()
@@ -64,6 +133,8 @@ void Window::detach()
   if (parent) {
     parent->removeChild(this);
     parent = nullptr;
+    if(lvobj != nullptr)
+      lv_obj_set_parent(lvobj, nullptr);
   }
 }
 
@@ -85,14 +156,14 @@ void Window::deleteLater(bool detach, bool trash)
   else
     parent = nullptr;
 
+  if (trash) {
+    Window::trash.push_back(this);
+  }
+
   deleteChildren();
 
   if (closeHandler) {
     closeHandler();
-  }
-
-  if (trash) {
-    Window::trash.push_back(this);
   }
 }
 
@@ -106,9 +177,20 @@ void Window::clear()
   invalidate();
 }
 
+void Window::clearLvgl()
+{
+  for (auto window: children)
+  {
+    if(lvobj != nullptr && window->lvobj != nullptr && window->lvobj->parent == lvobj)
+      window->clearLvgl();
+  }
+  lvobj = nullptr;
+}
+
 void Window::deleteChildren()
 {
   for (auto window: children) {
+    window->clearLvgl();
     window->deleteLater(false);
   }
   children.clear();
@@ -130,6 +212,12 @@ void Window::setFocus(uint8_t flag, Window * from)
   TRACE_WINDOWS("%s setFocus()", getWindowDebugString().c_str());
 
   if (focusWindow != this) {
+    // synchronize lvgl focused state with libopenui
+    lv_obj_add_state(lvobj, LV_STATE_FOCUSED);
+    if (focusWindow != nullptr) {
+      lv_obj_clear_state(focusWindow->lvobj, LV_STATE_FOCUSED);
+    }
+
     // scroll before calling focusHandler so that the window can adjust the scroll position if needed
     Window * parent = this->parent;
     while (parent && parent->getWindowFlags() & FORWARD_SCROLL) {
@@ -153,6 +241,7 @@ void Window::setScrollPositionX(coord_t value)
   auto newScrollPosition = max<coord_t>(0, min<coord_t>(innerWidth - width(), value));
   if (newScrollPosition != scrollPositionX) {
     scrollPositionX = newScrollPosition;
+    lv_obj_scroll_to_x(lvobj, scrollPositionX, LV_ANIM_OFF);
     invalidate();
   }
 }
@@ -167,6 +256,7 @@ void Window::setScrollPositionY(coord_t value)
 
   if (newScrollPosition != scrollPositionY) {
     scrollPositionY = newScrollPosition;
+    lv_obj_scroll_to_y(lvobj, value, LV_ANIM_OFF);
     invalidate();
   }
 }
@@ -230,6 +320,8 @@ bool Window::hasOpaqueRect(const rect_t & testRect) const
 
 void Window::fullPaint(BitmapBuffer * dc)
 {
+  if(lvobj != nullptr)
+    lv_obj_invalidate(lvobj);
   bool paintNeeded = true;
   std::list<Window *>::iterator firstChild;
 
@@ -494,6 +586,7 @@ coord_t Window::adjustHeight()
   coord_t old = rect.h;
   adjustInnerHeight();
   rect.h = innerHeight;
+  lv_obj_set_style_height(getLvObj(), rect.h, LV_PART_MAIN);
   return rect.h - old;
 }
 

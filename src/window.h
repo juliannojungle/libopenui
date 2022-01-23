@@ -30,6 +30,7 @@
 #include "libopenui_defines.h"
 #include "libopenui_helpers.h"
 #include "libopenui_config.h"
+#include "LvglWrapper.h"
 
 typedef uint32_t WindowFlags;
 
@@ -63,7 +64,7 @@ class Window
   friend class GridLayout;
 
   public:
-    Window(Window * parent, const rect_t & rect, WindowFlags windowFlags = 0, LcdFlags textFlags = 0);
+    Window(Window * parent, const rect_t & rect, WindowFlags windowFlags = 0, LcdFlags textFlags = 0, LvglWidgetFactory *factory = nullptr);
 
     virtual ~Window();
 
@@ -132,6 +133,15 @@ class Window
     void setTextFlags(LcdFlags flags)
     {
       textFlags = flags;
+
+      // lv integration for colors
+      auto textColor = COLOR_VAL(flags);
+      auto r = GET_RED(textColor), g = GET_GREEN(textColor), b = GET_BLUE(textColor);
+      lv_obj_set_style_text_color(lvobj, lv_color_make(r, g, b), LV_PART_MAIN);
+      for (uint32_t i = 0; i < lv_obj_get_child_cnt(lvobj); i++) {
+        auto child = lv_obj_get_child(lvobj, i);
+        lv_obj_set_style_text_color(child, lv_color_make(r, g, b), LV_PART_MAIN);
+      }
     }
 
     void setCloseHandler(std::function<void()> handler)
@@ -152,6 +162,7 @@ class Window
     virtual void deleteLater(bool detach = true, bool trash = true);
 
     void clear();
+    void clearLvgl();
 
     void deleteChildren();
 
@@ -384,7 +395,10 @@ class Window
       return _deleted;
     }
 
+    inline lv_obj_t *getLvObj() { return lvobj; }
+
   protected:
+    lv_obj_t *lvobj = nullptr;
     Window * parent;
     std::list<Window *> children;
     rect_t rect;
